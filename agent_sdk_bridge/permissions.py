@@ -22,6 +22,8 @@ from typing import Optional
 logger = logging.getLogger("hermes.agent_sdk_bridge.permissions")
 
 # Read-only / low-risk Claude Code tools available without /yolo.
+# Note: "Skill" only loads skill instructions; any powerful tools a skill then wants
+# to call are still gated by this same list, so it's safe to allow ungated.
 SAFE_TOOLS = [
     "Read",
     "Glob",
@@ -32,6 +34,7 @@ SAFE_TOOLS = [
     "NotebookRead",
     "BashOutput",
     "Task",  # subagents (read-oriented orchestration)
+    "Skill",  # invoke a loaded skill (instructions only; its tool use stays gated)
 ]
 
 

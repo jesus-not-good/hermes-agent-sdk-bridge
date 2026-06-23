@@ -1,8 +1,8 @@
 diff --git a/gateway/run.py b/gateway/run.py
-index 4f3b123..72149f7 100644
+index 4f3b123..73c8191 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -14411,6 +14411,75 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -14411,6 +14411,81 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
              from hermes_constants import get_hermes_home
              return get_hermes_home()
  
@@ -23,10 +23,16 @@ index 4f3b123..72149f7 100644
 +        term = user_config.get("terminal") or {}
 +        cwd = term.get("cwd") or os.path.expanduser("~")
 +        tools_mode = (os.environ.get("HERMES_SDK_TOOLS") or "full").strip().lower()
++        # Which on-disk setting sources to load (skills + CLAUDE.md + settings).
++        # Default loads the user's ~/.claude skills so the bot has them. Set
++        # HERMES_SDK_SETTING_SOURCES="" to disable (clean-room engine).
++        _ss = os.environ.get("HERMES_SDK_SETTING_SOURCES", "user,project,local").strip()
++        setting_sources = [s.strip() for s in _ss.split(",") if s.strip()] or None
 +        cfg = BridgeConfig(
 +            cwd=cwd,
 +            permission_mode=os.environ.get("HERMES_SDK_PERMISSION_MODE", "bypassPermissions"),
 +            tools=[] if tools_mode == "chat" else None,
++            setting_sources=setting_sources,
 +        )
 +        smap = FileSessionMap(_Path(home) / "agent_sdk_sessions.json")
 +        bridge = AgentSDKBridge(cfg, session_map=smap)
@@ -78,7 +84,7 @@ index 4f3b123..72149f7 100644
      async def _run_agent_inner(
          self,
          message: str,
-@@ -14451,6 +14520,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -14451,6 +14526,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                  event_message_id=event_message_id,
              )
  
