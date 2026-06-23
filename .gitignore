@@ -1,0 +1,17 @@
+# secrets — never commit
+.env
+*.env
+*.token
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# runtime state
+agent_sdk_sessions.json
+*.tmp
+
+# os
+.DS_Store

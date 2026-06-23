@@ -1,0 +1,140 @@
+diff --git a/gateway/run.py b/gateway/run.py
+index 4f3b123..72149f7 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -14411,6 +14411,75 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+             from hermes_constants import get_hermes_home
+             return get_hermes_home()
+ 
++    def _agent_sdk_bridge(self):
++        """Lazily build the shared AgentSDKBridge (Claude Code engine, subscription)."""
++        bridge = getattr(self, "_sdk_bridge", None)
++        if bridge is not None:
++            return bridge
++        import os
++        from pathlib import Path as _Path
++        from agent_sdk_bridge import AgentSDKBridge, BridgeConfig, FileSessionMap
++        try:
++            from hermes_constants import get_hermes_home
++            home = str(get_hermes_home())
++        except Exception:
++            home = os.path.expanduser("~/.hermes")
++        user_config = _load_gateway_config()
++        term = user_config.get("terminal") or {}
++        cwd = term.get("cwd") or os.path.expanduser("~")
++        tools_mode = (os.environ.get("HERMES_SDK_TOOLS") or "full").strip().lower()
++        cfg = BridgeConfig(
++            cwd=cwd,
++            permission_mode=os.environ.get("HERMES_SDK_PERMISSION_MODE", "bypassPermissions"),
++            tools=[] if tools_mode == "chat" else None,
++        )
++        smap = FileSessionMap(_Path(home) / "agent_sdk_sessions.json")
++        bridge = AgentSDKBridge(cfg, session_map=smap)
++        self._sdk_bridge = bridge
++        return bridge
++
++    async def _run_agent_via_sdk_bridge(
++        self,
++        message: str,
++        source: SessionSource,
++        session_key: Optional[str] = None,
++        run_generation: Optional[int] = None,
++    ) -> Dict[str, Any]:
++        """Run one turn via the Claude Agent SDK; return the _run_agent contract dict."""
++        bridge = self._agent_sdk_bridge()
++        key = session_key or f"{getattr(source.platform, 'value', source.platform)}:{source.chat_id}"
++        logger.info("[agent_sdk_bridge] turn via Claude Code engine (subscription), key=%s", key)
++        # Inject Hermes file-memory (MEMORY.md/USER.md) into this turn's system prompt.
++        extra_append = None
++        try:
++            from pathlib import Path as _MemPath
++            from agent_sdk_bridge import load_memory_append
++            from hermes_constants import get_hermes_home
++            _mem_cfg = _load_gateway_config().get("memory") or {}
++            extra_append = load_memory_append(
++                _MemPath(str(get_hermes_home())) / "memories",
++                memory_char_limit=int(_mem_cfg.get("memory_char_limit") or 2200),
++                user_char_limit=int(_mem_cfg.get("user_char_limit") or 1375),
++            )
++        except Exception:
++            logger.debug("[agent_sdk_bridge] memory load failed", exc_info=True)
++        try:
++            result = await bridge.run_turn(key, message, extra_system_append=extra_append)
++        except Exception as e:
++            logger.exception("agent_sdk_bridge turn failed (key=%s)", key)
++            return {
++                "final_response": f"⚠️ Agent SDK error: {e}",
++                "messages": [],
++                "api_calls": 0,
++                "completed": False,
++            }
++        return {
++            "final_response": result.text or "(empty)",
++            "messages": [],
++            "api_calls": result.num_turns or 1,
++            "completed": not result.is_error,
++        }
++
+     async def _run_agent_inner(
+         self,
+         message: str,
+@@ -14451,6 +14520,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+                 event_message_id=event_message_id,
+             )
+ 
++        # ---- Agent SDK bridge mode (Claude Code engine on the Max subscription) ----
++        # Flag-gated and inert by default: when HERMES_USE_AGENT_SDK is truthy, run the
++        # turn through the Claude Agent SDK instead of the legacy AIAgent/provider path.
++        import os as _os_sdk
++        if (_os_sdk.environ.get("HERMES_USE_AGENT_SDK") or "").strip().lower() in {"1", "true", "yes", "on"}:
++            return await self._run_agent_via_sdk_bridge(
++                message=message,
++                source=source,
++                session_key=session_key,
++                run_generation=run_generation,
++            )
++
+         from run_agent import AIAgent
+         import queue
+ 
+diff --git a/gateway/slash_commands.py b/gateway/slash_commands.py
+index ab9ea97..5bc1c8b 100644
+--- a/gateway/slash_commands.py
++++ b/gateway/slash_commands.py
+@@ -67,6 +67,13 @@ class GatewaySlashCommandsMixin:
+         
+         # Get existing session key
+         session_key = self._session_key_for_source(source)
++        # Agent SDK bridge: forget the SDK session id so /new truly starts fresh there.
++        try:
++            import os as _os_sdk
++            if (_os_sdk.environ.get("HERMES_USE_AGENT_SDK") or "").strip().lower() in {"1", "true", "yes", "on"}:
++                self._agent_sdk_bridge().start_new(session_key)
++        except Exception:
++            logger.debug("agent_sdk_bridge start_new on /new failed", exc_info=True)
+         self._invalidate_session_run_generation(session_key, reason="session_reset")
+         # Evict the running-agent slot now that the generation is bumped. The
+         # in-flight run's own guarded release (run_generation=old) will return
+@@ -2500,12 +2507,20 @@ class GatewaySlashCommandsMixin:
+ 
+         session_key = self._session_key_for_source(event.source)
+         current = is_session_yolo_enabled(session_key)
++        new_state = not current
+         if current:
+             disable_session_yolo(session_key)
+-            return EphemeralReply(t("gateway.yolo.disabled"))
+         else:
+             enable_session_yolo(session_key)
+-            return EphemeralReply(t("gateway.yolo.enabled"))
++        # Mirror into the Agent SDK bridge permission policy so /yolo also
++        # ungates the SDK path's tool use for this chat.
++        try:
++            import os as _os_sdk
++            if (_os_sdk.environ.get("HERMES_USE_AGENT_SDK") or "").strip().lower() in {"1", "true", "yes", "on"}:
++                self._agent_sdk_bridge().permissions.set_yolo(session_key, new_state)
++        except Exception:
++            logger.debug("agent_sdk_bridge yolo sync failed", exc_info=True)
++        return EphemeralReply(t("gateway.yolo.enabled" if new_state else "gateway.yolo.disabled"))
+ 
+     async def _handle_verbose_command(self, event: MessageEvent) -> str:
+         """Handle /verbose command — cycle tool progress display mode.
