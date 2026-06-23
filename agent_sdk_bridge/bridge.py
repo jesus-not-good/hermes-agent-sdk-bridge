@@ -185,43 +185,52 @@ class AgentSDKBridge:
         extra_system_append: Optional[str] = None,
     ) -> TurnResult:
         """Run one user turn; resume the chat's SDK session if we have one."""
-        resume = self.sessions.get(session_key)
-        do_fork = bool(resume) and session_key in self._pending_fork
-        tools_eff = self.permissions.resolve_tools(session_key, self.config.tools)
-        options = self._build_options(
-            resume=resume, cwd=cwd, append=extra_system_append, fork=do_fork, tools=tools_eff
-        )
+        last_exc: Optional[Exception] = None
+        for attempt in range(2):  # one retry on transient SDK/transport errors
+            resume = self.sessions.get(session_key)
+            do_fork = bool(resume) and session_key in self._pending_fork
+            tools_eff = self.permissions.resolve_tools(session_key, self.config.tools)
+            options = self._build_options(
+                resume=resume, cwd=cwd, append=extra_system_append, fork=do_fork, tools=tools_eff
+            )
 
-        chunks: list[str] = []
-        result: Optional[ResultMessage] = None
-        try:
-            async for msg in query(prompt=user_text, options=options):
-                if isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        if isinstance(block, TextBlock):
-                            chunks.append(block.text)
-                            if on_text:
-                                on_text(block.text)
-                        elif isinstance(block, ToolUseBlock) and on_tool:
-                            on_tool(block.name, dict(block.input or {}))
-                elif isinstance(msg, ResultMessage):
-                    result = msg
-                    if msg.session_id:
-                        self.sessions.set(session_key, msg.session_id)
-        except Exception:
-            logger.exception("agent_sdk_bridge.run_turn failed (key=%s)", session_key)
-            raise
+            chunks: list[str] = []
+            result: Optional[ResultMessage] = None
+            try:
+                async for msg in query(prompt=user_text, options=options):
+                    if isinstance(msg, AssistantMessage):
+                        for block in msg.content:
+                            if isinstance(block, TextBlock):
+                                chunks.append(block.text)
+                                if on_text:
+                                    on_text(block.text)
+                            elif isinstance(block, ToolUseBlock) and on_tool:
+                                on_tool(block.name, dict(block.input or {}))
+                    elif isinstance(msg, ResultMessage):
+                        result = msg
+                        if msg.session_id:
+                            self.sessions.set(session_key, msg.session_id)
+            except Exception as e:
+                last_exc = e
+                logger.warning(
+                    "agent_sdk_bridge.run_turn attempt %d/2 failed (key=%s): %s",
+                    attempt + 1, session_key, e,
+                )
+                continue  # transient (SDK error message / transport blip) — retry once
 
-        self._pending_fork.discard(session_key)
-        text = (result.result if result and result.result else "".join(chunks)).strip()
-        return TurnResult(
-            text=text,
-            session_id=result.session_id if result else None,
-            is_error=bool(getattr(result, "is_error", False)) if result else True,
-            subtype=getattr(result, "subtype", None) if result else None,
-            total_cost_usd=getattr(result, "total_cost_usd", None) if result else None,
-            num_turns=getattr(result, "num_turns", None) if result else None,
-        )
+            self._pending_fork.discard(session_key)
+            text = (result.result if result and result.result else "".join(chunks)).strip()
+            return TurnResult(
+                text=text,
+                session_id=result.session_id if result else None,
+                is_error=bool(getattr(result, "is_error", False)) if result else True,
+                subtype=getattr(result, "subtype", None) if result else None,
+                total_cost_usd=getattr(result, "total_cost_usd", None) if result else None,
+                num_turns=getattr(result, "num_turns", None) if result else None,
+            )
+
+        logger.error("agent_sdk_bridge.run_turn failed after retry (key=%s): %s", session_key, last_exc)
+        raise last_exc  # type: ignore[misc]
 
     # --- session ops used by Phase 2 slash commands ---
 
