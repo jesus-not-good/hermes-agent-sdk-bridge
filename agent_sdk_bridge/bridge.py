@@ -9,21 +9,32 @@ Design (validated in scratchpad/bridge_proto.py):
   always; powerful tools only when the chat has /yolo. This avoids the SDK's
   `can_use_tool` callback, which would force streaming-input mode.
 
-Why query()+resume per turn (not a long-lived ClaudeSDKClient): it scales to many idle
-chats with no persistent Node engine per chat. A warm-client cache is a later optimization.
+Two execution modes:
+- Cold (default): `query()` + `resume` per turn. Spawns the Node engine each turn
+  (~5-8s tax) but holds no persistent subprocess — scales to many idle chats.
+- Warm (`BridgeConfig.warm`): a long-lived `ClaudeSDKClient` per chat. The engine is
+  spawned once on connect and reused across turns, eliminating the per-turn spawn tax.
+  Under asyncio the SDK's read loop is bound to the event loop (not the calling task —
+  see _internal/_task_compat.spawn_detached), so a warm client can be driven across
+  turns/tasks safely. We serialize a chat's turns with a per-key lock, reconnect when
+  the system-prompt/tool signature changes (memory edit, /yolo) or on /branch, and bound
+  live subprocesses with an LRU cap + lazy idle reaping.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import monotonic
 from typing import Awaitable, Callable, Optional, Protocol
 
 from claude_agent_sdk import (
     query,
+    ClaudeSDKClient,
     ClaudeAgentOptions,
     AssistantMessage,
     TextBlock,
@@ -114,6 +125,10 @@ class BridgeConfig:
     setting_sources: Optional[list[str]] = None
     append_system_prompt: Optional[str] = None
     max_turns: Optional[int] = None
+    # Warm mode: hold a long-lived ClaudeSDKClient per chat (reuse the engine).
+    warm: bool = False
+    warm_max: int = 6  # max concurrent live engine subprocesses (LRU-evicted)
+    warm_idle_seconds: float = 900.0  # reap a warm client idle longer than this
 
 
 @dataclass
@@ -124,6 +139,14 @@ class TurnResult:
     subtype: Optional[str]
     total_cost_usd: Optional[float]
     num_turns: Optional[int]
+
+
+@dataclass
+class _WarmEntry:
+    client: ClaudeSDKClient
+    lock: asyncio.Lock
+    signature: tuple
+    last_used: float
 
 
 class AgentSDKBridge:
@@ -138,6 +161,11 @@ class AgentSDKBridge:
         self.can_use_tool = can_use_tool  # reserved for v2 streaming approval
         self._pending_fork: set[str] = set()
         self.permissions = PermissionManager()
+        # Warm-mode state.
+        self._warm: dict[str, _WarmEntry] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._warm_lock = asyncio.Lock()  # guards _warm structure + serializes connects
+        self._warm_dead: set[str] = set()  # keys forced to reconnect on next turn
 
     def _build_options(
         self,
@@ -185,6 +213,29 @@ class AgentSDKBridge:
         extra_system_append: Optional[str] = None,
     ) -> TurnResult:
         """Run one user turn; resume the chat's SDK session if we have one."""
+        if self.config.warm:
+            return await self._run_turn_warm(
+                session_key, user_text,
+                on_text=on_text, on_tool=on_tool, cwd=cwd,
+                extra_system_append=extra_system_append,
+            )
+        return await self._run_turn_cold(
+            session_key, user_text,
+            on_text=on_text, on_tool=on_tool, cwd=cwd,
+            extra_system_append=extra_system_append,
+        )
+
+    async def _run_turn_cold(
+        self,
+        session_key: str,
+        user_text: str,
+        *,
+        on_text: Optional[OnText] = None,
+        on_tool: Optional[OnTool] = None,
+        cwd: Optional[str] = None,
+        extra_system_append: Optional[str] = None,
+    ) -> TurnResult:
+        """Cold path: a fresh engine per turn via query()+resume."""
         last_exc: Optional[Exception] = None
         for attempt in range(2):  # one retry on transient SDK/transport errors
             resume = self.sessions.get(session_key)
@@ -219,18 +270,200 @@ class AgentSDKBridge:
                 continue  # transient (SDK error message / transport blip) — retry once
 
             self._pending_fork.discard(session_key)
-            text = (result.result if result and result.result else "".join(chunks)).strip()
-            return TurnResult(
-                text=text,
-                session_id=result.session_id if result else None,
-                is_error=bool(getattr(result, "is_error", False)) if result else True,
-                subtype=getattr(result, "subtype", None) if result else None,
-                total_cost_usd=getattr(result, "total_cost_usd", None) if result else None,
-                num_turns=getattr(result, "num_turns", None) if result else None,
-            )
+            return self._make_result(result, chunks, session_key)
 
         logger.error("agent_sdk_bridge.run_turn failed after retry (key=%s): %s", session_key, last_exc)
         raise last_exc  # type: ignore[misc]
+
+    # --- warm path -------------------------------------------------------
+
+    async def _run_turn_warm(
+        self,
+        session_key: str,
+        user_text: str,
+        *,
+        on_text: Optional[OnText] = None,
+        on_tool: Optional[OnTool] = None,
+        cwd: Optional[str] = None,
+        extra_system_append: Optional[str] = None,
+    ) -> TurnResult:
+        """Warm path: reuse a long-lived ClaudeSDKClient per chat."""
+        lock = self._get_lock(session_key)
+        async with lock:  # serialize this chat's turns
+            last_exc: Optional[Exception] = None
+            for attempt in range(2):
+                try:
+                    entry = await self._ensure_warm(
+                        session_key, cwd, extra_system_append, force_new=(attempt == 1)
+                    )
+                except Exception as e:
+                    last_exc = e
+                    logger.warning("warm connect attempt %d/2 failed (key=%s): %s",
+                                   attempt + 1, session_key, e)
+                    continue
+
+                chunks: list[str] = []
+                result: Optional[ResultMessage] = None
+                try:
+                    await entry.client.query(user_text)
+                    async for msg in entry.client.receive_response():
+                        if isinstance(msg, AssistantMessage):
+                            for block in msg.content:
+                                if isinstance(block, TextBlock):
+                                    chunks.append(block.text)
+                                    if on_text:
+                                        on_text(block.text)
+                                elif isinstance(block, ToolUseBlock) and on_tool:
+                                    on_tool(block.name, dict(block.input or {}))
+                        elif isinstance(msg, ResultMessage):
+                            result = msg
+                            if msg.session_id:
+                                self.sessions.set(session_key, msg.session_id)
+                except Exception as e:
+                    last_exc = e
+                    logger.warning("warm turn attempt %d/2 failed (key=%s): %s",
+                                   attempt + 1, session_key, e)
+                    await self._drop_warm(session_key)  # subprocess likely dead -> reconnect
+                    continue
+
+                entry.last_used = monotonic()
+                self._pending_fork.discard(session_key)
+                self._reap_idle_lazy()
+                return self._make_result(result, chunks, session_key)
+
+            logger.error("warm turn failed after retry (key=%s): %s", session_key, last_exc)
+            raise last_exc  # type: ignore[misc]
+
+    async def _ensure_warm(
+        self,
+        session_key: str,
+        cwd: Optional[str],
+        append: Optional[str],
+        force_new: bool,
+    ) -> _WarmEntry:
+        """Return a connected warm client for the chat, (re)connecting when needed."""
+        resume = self.sessions.get(session_key)
+        do_fork = bool(resume) and session_key in self._pending_fork
+        tools_eff = self.permissions.resolve_tools(session_key, self.config.tools)
+        sig = (repr(tools_eff), append or "")
+
+        async with self._warm_lock:
+            entry = self._warm.get(session_key)
+            reuse = (
+                entry is not None
+                and not force_new
+                and not do_fork
+                and entry.signature == sig
+                and session_key not in self._warm_dead
+            )
+            if reuse:
+                return entry  # type: ignore[return-value]
+
+            # (Re)connect: tear down any stale client first.
+            if entry is not None:
+                await self._safe_disconnect(entry.client)
+                self._warm.pop(session_key, None)
+            self._warm_dead.discard(session_key)
+
+            options = self._build_options(
+                resume=resume, cwd=cwd, append=append, fork=do_fork, tools=tools_eff
+            )
+            client = ClaudeSDKClient(options=options)
+            await client.connect()
+            entry = _WarmEntry(
+                client=client,
+                lock=self._get_lock(session_key),
+                signature=sig,
+                last_used=monotonic(),
+            )
+            self._warm[session_key] = entry
+            if do_fork:
+                self._pending_fork.discard(session_key)
+            await self._evict_lru_locked(protect=session_key)
+            return entry
+
+    def _get_lock(self, session_key: str) -> asyncio.Lock:
+        # No await between get and set -> race-free under asyncio.
+        lock = self._locks.get(session_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[session_key] = lock
+        return lock
+
+    async def _safe_disconnect(self, client: ClaudeSDKClient) -> None:
+        try:
+            await client.disconnect()
+        except Exception:
+            logger.debug("warm disconnect failed", exc_info=True)
+
+    async def _drop_warm(self, session_key: str) -> None:
+        """Disconnect + forget a chat's warm client (e.g. after a transport error)."""
+        async with self._warm_lock:
+            entry = self._warm.pop(session_key, None)
+        if entry is not None:
+            await self._safe_disconnect(entry.client)
+
+    async def _evict_lru_locked(self, protect: str) -> None:
+        """Evict least-recently-used idle warm clients over capacity. Caller holds _warm_lock."""
+        if len(self._warm) <= self.config.warm_max:
+            return
+        cands = [
+            (e.last_used, k, e)
+            for k, e in self._warm.items()
+            if k != protect and not e.lock.locked()
+        ]
+        cands.sort(key=lambda t: t[0])
+        for _, k, e in cands:
+            if len(self._warm) <= self.config.warm_max:
+                break
+            self._warm.pop(k, None)
+            await self._safe_disconnect(e.client)
+
+    def _reap_idle_lazy(self) -> None:
+        """Best-effort: schedule a sweep of idle warm clients (never raises)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._reap_idle())
+
+    async def _reap_idle(self) -> None:
+        now = monotonic()
+        async with self._warm_lock:
+            victims = [
+                (k, e)
+                for k, e in self._warm.items()
+                if not e.lock.locked() and now - e.last_used > self.config.warm_idle_seconds
+            ]
+            for k, _ in victims:
+                self._warm.pop(k, None)
+        for _, e in victims:
+            await self._safe_disconnect(e.client)
+
+    def _schedule_disconnect(self, client: ClaudeSDKClient) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._safe_disconnect(client))
+        except RuntimeError:
+            pass
+
+    # --- shared ----------------------------------------------------------
+
+    def _make_result(
+        self,
+        result: Optional[ResultMessage],
+        chunks: list[str],
+        session_key: str,
+    ) -> TurnResult:
+        text = (result.result if result and result.result else "".join(chunks)).strip()
+        return TurnResult(
+            text=text,
+            session_id=result.session_id if result else self.sessions.get(session_key),
+            is_error=bool(getattr(result, "is_error", False)) if result else True,
+            subtype=getattr(result, "subtype", None) if result else None,
+            total_cost_usd=getattr(result, "total_cost_usd", None) if result else None,
+            num_turns=getattr(result, "num_turns", None) if result else None,
+        )
 
     # --- session ops used by Phase 2 slash commands ---
 
@@ -238,6 +471,13 @@ class AgentSDKBridge:
         """/new — forget the SDK session id so the next turn starts fresh."""
         self.sessions.clear(session_key)
         self._pending_fork.discard(session_key)
+        if self.config.warm:
+            # Force a fresh connect next turn; tear down the current client if idle.
+            self._warm_dead.add(session_key)
+            entry = self._warm.get(session_key)
+            if entry is not None and not entry.lock.locked():
+                self._warm.pop(session_key, None)
+                self._schedule_disconnect(entry.client)
 
     def request_fork(self, session_key: str) -> bool:
         """/branch — next turn forks the SDK session (new id; original preserved on disk)."""
@@ -248,3 +488,11 @@ class AgentSDKBridge:
 
     def current_session_id(self, session_key: str) -> Optional[str]:
         return self.sessions.get(session_key)
+
+    async def aclose(self) -> None:
+        """Disconnect all warm clients (graceful shutdown)."""
+        async with self._warm_lock:
+            entries = list(self._warm.values())
+            self._warm.clear()
+        for e in entries:
+            await self._safe_disconnect(e.client)

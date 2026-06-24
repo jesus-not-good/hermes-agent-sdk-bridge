@@ -1,8 +1,8 @@
 diff --git a/gateway/run.py b/gateway/run.py
-index 4f3b123..73c8191 100644
+index 4f3b123..cb0d4e9 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -14411,6 +14411,81 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -14411,6 +14411,94 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
              from hermes_constants import get_hermes_home
              return get_hermes_home()
  
@@ -28,11 +28,24 @@ index 4f3b123..73c8191 100644
 +        # HERMES_SDK_SETTING_SOURCES="" to disable (clean-room engine).
 +        _ss = os.environ.get("HERMES_SDK_SETTING_SOURCES", "user,project,local").strip()
 +        setting_sources = [s.strip() for s in _ss.split(",") if s.strip()] or None
++        # Warm mode: hold a long-lived ClaudeSDKClient per chat (reuse the engine,
++        # ~5-8s faster per turn). Off by default; opt in with HERMES_SDK_WARM=1.
++        warm = (os.environ.get("HERMES_SDK_WARM") or "").strip().lower() in {"1", "true", "yes", "on"}
++
++        def _int_env(name: str, default: int) -> int:
++            try:
++                return int(os.environ.get(name) or default)
++            except (TypeError, ValueError):
++                return default
++
 +        cfg = BridgeConfig(
 +            cwd=cwd,
 +            permission_mode=os.environ.get("HERMES_SDK_PERMISSION_MODE", "bypassPermissions"),
 +            tools=[] if tools_mode == "chat" else None,
 +            setting_sources=setting_sources,
++            warm=warm,
++            warm_max=_int_env("HERMES_SDK_WARM_MAX", 6),
++            warm_idle_seconds=float(_int_env("HERMES_SDK_WARM_IDLE", 900)),
 +        )
 +        smap = FileSessionMap(_Path(home) / "agent_sdk_sessions.json")
 +        bridge = AgentSDKBridge(cfg, session_map=smap)
@@ -84,7 +97,7 @@ index 4f3b123..73c8191 100644
      async def _run_agent_inner(
          self,
          message: str,
-@@ -14451,6 +14526,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -14451,6 +14539,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                  event_message_id=event_message_id,
              )
  

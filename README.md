@@ -103,6 +103,9 @@ env -u ANTHROPIC_API_KEY \
 | `HERMES_USE_AGENT_SDK` | `1`/`true`/… | off | Route turns through the Agent SDK bridge. Off = stock Hermes. |
 | `HERMES_SDK_TOOLS` | `full` \| `chat` | `full` | `full` = Claude Code toolset (gated by `/yolo`); `chat` = no tools, pure chat. |
 | `HERMES_SDK_PERMISSION_MODE` | SDK permission mode | `bypassPermissions` | Applied to whatever tools are *available* (availability is gated separately). |
+| `HERMES_SDK_WARM` | `1`/`true`/… | off | Hold a long-lived `ClaudeSDKClient` per chat (reuse the engine across turns). Cuts ~5–8s/turn (the spawn tax; ~14s with the full toolset). Off = cold `query()`+`resume` per turn. |
+| `HERMES_SDK_WARM_MAX` | int | `6` | Max concurrent live engine subprocesses (LRU-evicted) when warm. |
+| `HERMES_SDK_WARM_IDLE` | seconds | `900` | Reap a warm client idle longer than this. |
 
 The flag is **off by default**, so installing the add-on does not change stock behavior until
 you opt in.
@@ -126,13 +129,13 @@ subscription.
 ## Status
 
 Working & verified: subscription auth (CLI + SDK), session-persistent multi-turn, memory
-injection, fork at the bridge level, `/new`, `/yolo` tool gating, full multi-step tool turns
-over Telegram.
+injection, fork at the bridge level (`/branch`), `/new`, `/yolo` tool gating, full multi-step
+tool turns over Telegram, on-disk skills via `setting_sources`, and the warm-client latency
+optimization (`HERMES_SDK_WARM` — engine reused across turns; verified continuity, reconnect
+on memory/yolo change, fork, reset, and idle reap).
 
-Work in progress: carrying Hermes' bundled skills into the SDK (`setting_sources`), a true
-`/approve` `/deny` approval round-trip (current gating denies powerful tools until `/yolo`),
-wiring `/branch` to the bridge fork, and a warm-client latency optimization (the bridge spawns
-the engine per turn, ~7-8s base).
+Work in progress: a true `/approve` `/deny` approval round-trip (current gating denies
+powerful tools until `/yolo`).
 
 ## Always-on (macOS, launchd)
 
