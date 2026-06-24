@@ -1,5 +1,5 @@
 diff --git a/gateway/run.py b/gateway/run.py
-index 4f3b123..541dc0f 100644
+index 4f3b123..3bee199 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
 @@ -8048,6 +8048,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
@@ -35,7 +35,7 @@ index 4f3b123..541dc0f 100644
          self._invalidate_session_run_generation(session_key, reason=invalidation_reason)
          adapter = self.adapters.get(source.platform)
          if adapter and hasattr(adapter, "interrupt_session_activity"):
-@@ -14411,6 +14430,136 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -14411,6 +14430,155 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
              from hermes_constants import get_hermes_home
              return get_hermes_home()
  
@@ -118,6 +118,25 @@ index 4f3b123..541dc0f 100644
 +        except Exception:
 +            logger.debug("[agent_sdk_bridge] memory load failed", exc_info=True)
 +
++        # Bot operating context. The engine loads the user's ~/.claude (CLAUDE.md, MCP,
++        # oh-my-claudecode) and otherwise mis-identifies as an interactive Claude Code CLI
++        # or a read-only design session — telling the user to "open a terminal". Assert the
++        # real context so it executes directly. Prepended ahead of file-memory.
++        _BOT_PERSONA = (
++            "OPERATING CONTEXT — read carefully:\n"
++            "- You are running as a Telegram bot powered by the Claude Code engine. The user "
++            "chats with you from Telegram, often on a phone. There is NO interactive terminal "
++            "and NO separate Claude Code session — you ARE the execution environment.\n"
++            "- You HAVE a full toolset in THIS session: Bash, Write, Edit, Read, Glob, Grep, etc. "
++            "Use them directly. If a tool ever seems unavailable, just try it — do NOT assume you "
++            "are read-only.\n"
++            "- NEVER tell the user to open a terminal, open 'regular Claude Code', run commands "
++            "themselves, or switch to another session. Do the work yourself and report results.\n"
++            "- Do not describe yourself as a read-only or design-only session.\n"
++            "- Keep replies concise and chat-friendly. Reply in the user's language (Russian)."
++        )
++        extra_append = _BOT_PERSONA if not extra_append else (_BOT_PERSONA + "\n\n" + extra_append)
++
 +        # Surface which skills the engine invokes this turn (HERMES_SDK_SHOW_SKILLS,
 +        # default on). Skills arrive as ToolUseBlock(name="Skill"); the skill name's
 +        # input key varies, so probe a few then fall back to the first string value.
@@ -172,7 +191,7 @@ index 4f3b123..541dc0f 100644
      async def _run_agent_inner(
          self,
          message: str,
-@@ -14451,6 +14600,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -14451,6 +14619,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                  event_message_id=event_message_id,
              )
  
