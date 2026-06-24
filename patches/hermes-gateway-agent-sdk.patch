@@ -104,7 +104,7 @@ index 4f3b123..73c8191 100644
          import queue
  
 diff --git a/gateway/slash_commands.py b/gateway/slash_commands.py
-index ab9ea97..5bc1c8b 100644
+index ab9ea97..bc6a2a2 100644
 --- a/gateway/slash_commands.py
 +++ b/gateway/slash_commands.py
 @@ -67,6 +67,13 @@ class GatewaySlashCommandsMixin:
@@ -144,3 +144,19 @@ index ab9ea97..5bc1c8b 100644
  
      async def _handle_verbose_command(self, event: MessageEvent) -> str:
          """Handle /verbose command — cycle tool progress display mode.
+@@ -3219,6 +3234,15 @@ class GatewaySlashCommandsMixin:
+         source = event.source
+         session_key = self._session_key_for_source(source)
+ 
++        # Agent SDK bridge: fork the SDK session too, so the branch continues on a
++        # copy of the conversation in the engine (next turn uses fork_session).
++        try:
++            import os as _os_sdk
++            if (_os_sdk.environ.get("HERMES_USE_AGENT_SDK") or "").strip().lower() in {"1", "true", "yes", "on"}:
++                self._agent_sdk_bridge().request_fork(session_key)
++        except Exception:
++            logger.debug("agent_sdk_bridge request_fork on /branch failed", exc_info=True)
++
+         # Load the current session and its transcript
+         current_entry = self.session_store.get_or_create_session(source)
+         history = self.session_store.load_transcript(current_entry.session_id)
