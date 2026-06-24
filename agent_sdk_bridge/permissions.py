@@ -39,19 +39,30 @@ SAFE_TOOLS = [
 
 
 class PermissionManager:
-    """Per-session tool-availability policy for the SDK bridge."""
+    """Per-session tool-availability policy for the SDK bridge.
 
-    def __init__(self) -> None:
-        self._yolo: set[str] = set()
+    default_yolo: when True, every session gets the full toolset (Bash/Write/Edit/…)
+    by default — equivalent to /yolo always on. A per-session `/yolo off` still wins
+    (explicit OFF overrides the default), and `/yolo on` is a no-op since it's already on.
+    """
+
+    def __init__(self, default_yolo: bool = False) -> None:
+        self._yolo: set[str] = set()       # explicit per-session ON
+        self._yolo_off: set[str] = set()   # explicit per-session OFF (overrides default)
+        self.default_yolo = default_yolo
 
     def set_yolo(self, session_key: str, on: bool) -> None:
         if on:
             self._yolo.add(session_key)
+            self._yolo_off.discard(session_key)
         else:
+            self._yolo_off.add(session_key)
             self._yolo.discard(session_key)
 
     def is_yolo(self, session_key: str) -> bool:
-        return session_key in self._yolo
+        if session_key in self._yolo_off:
+            return False
+        return session_key in self._yolo or self.default_yolo
 
     def resolve_tools(self, session_key: str, base_tools: Optional[list]):
         """Return the effective `tools` value for this turn.

@@ -1,8 +1,41 @@
 diff --git a/gateway/run.py b/gateway/run.py
-index 4f3b123..88a75e0 100644
+index 4f3b123..541dc0f 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -14411,6 +14411,129 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -8048,6 +8048,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+                     canonical = _cmd_def.name if _cmd_def else command
+                     break
+ 
++        # ---- Agent SDK fork: honest gate for not-yet-rewired commands ----
++        # Under HERMES_USE_AGENT_SDK the legacy brain is bypassed; commands still
++        # wired to it would no-op. Answer honestly instead of pretending. Entries
++        # are removed from the gate as each command is rewired (plan R1-R4).
++        if command and canonical:
++            from hermes_sdk_gate import sdk_command_gate_message
++            _sdk_gate = sdk_command_gate_message(canonical)
++            if _sdk_gate is not None:
++                return _sdk_gate
++
+         if canonical == "new":
+             if self._is_telegram_topic_root_lobby(source):
+                 return self._telegram_topic_root_new_message()
+@@ -13738,6 +13748,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+         running_agent = self._running_agents.get(session_key)
+         if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
+             running_agent.interrupt(interrupt_reason)
++        else:
++            # Agent SDK fork: no legacy agent in the slot (sentinel/None) — interrupt
++            # the warm engine turn directly if one is in flight (R1: /stop).
++            try:
++                import os as _os_int
++                if (_os_int.environ.get("HERMES_USE_AGENT_SDK") or "").strip().lower() in {"1", "true", "yes", "on"}:
++                    await self._agent_sdk_bridge().interrupt(session_key)
++            except Exception:
++                logger.debug("[agent_sdk_bridge] interrupt failed", exc_info=True)
+         self._invalidate_session_run_generation(session_key, reason=invalidation_reason)
+         adapter = self.adapters.get(source.platform)
+         if adapter and hasattr(adapter, "interrupt_session_activity"):
+@@ -14411,6 +14430,136 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
              from hermes_constants import get_hermes_home
              return get_hermes_home()
  
@@ -49,6 +82,13 @@ index 4f3b123..88a75e0 100644
 +        )
 +        smap = FileSessionMap(_Path(home) / "agent_sdk_sessions.json")
 +        bridge = AgentSDKBridge(cfg, session_map=smap)
++        # Full toolset (Bash/Write/Edit/…) by default for every session — equivalent
++        # to /yolo always on. Opt in with HERMES_SDK_YOLO_DEFAULT=1. A per-session
++        # `/yolo off` still wins. Reachable-from-phone bot runs shell autonomously,
++        # so keep the platform allowlist locked to your own id.
++        bridge.permissions.default_yolo = (
++            os.environ.get("HERMES_SDK_YOLO_DEFAULT") or ""
++        ).strip().lower() in {"1", "true", "yes", "on"}
 +        self._sdk_bridge = bridge
 +        return bridge
 +
@@ -132,7 +172,7 @@ index 4f3b123..88a75e0 100644
      async def _run_agent_inner(
          self,
          message: str,
-@@ -14451,6 +14574,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -14451,6 +14600,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                  event_message_id=event_message_id,
              )
  

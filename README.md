@@ -107,6 +107,7 @@ env -u ANTHROPIC_API_KEY \
 | `HERMES_SDK_WARM_MAX` | int | `6` | Max concurrent live engine subprocesses (LRU-evicted) when warm. |
 | `HERMES_SDK_WARM_IDLE` | seconds | `900` | Reap a warm client idle longer than this. |
 | `HERMES_SDK_SHOW_SKILLS` | `1`/`0` | on | Append a line listing the skills the engine invoked this turn (`ToolUseBlock(name="Skill")`) to the reply. |
+| `HERMES_SDK_YOLO_DEFAULT` | `1`/`0` | off | Give every session the full toolset (Bash/Write/Edit/…) by default — like `/yolo` always on. A per-session `/yolo off` still wins. ⚠️ The bot then runs shell + writes files autonomously every turn — keep the platform allowlist locked to your own id. |
 
 The flag is **off by default**, so installing the add-on does not change stock behavior until
 you opt in.
