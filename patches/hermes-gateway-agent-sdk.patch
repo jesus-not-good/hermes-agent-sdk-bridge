@@ -1,8 +1,8 @@
 diff --git a/gateway/run.py b/gateway/run.py
-index 4f3b123..cb0d4e9 100644
+index 4f3b123..88a75e0 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -14411,6 +14411,94 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -14411,6 +14411,129 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
              from hermes_constants import get_hermes_home
              return get_hermes_home()
  
@@ -77,8 +77,40 @@ index 4f3b123..cb0d4e9 100644
 +            )
 +        except Exception:
 +            logger.debug("[agent_sdk_bridge] memory load failed", exc_info=True)
++
++        # Surface which skills the engine invokes this turn (HERMES_SDK_SHOW_SKILLS,
++        # default on). Skills arrive as ToolUseBlock(name="Skill"); the skill name's
++        # input key varies, so probe a few then fall back to the first string value.
++        import os as _os_show
++        show_skills = (_os_show.environ.get("HERMES_SDK_SHOW_SKILLS", "1") or "").strip().lower() in {"1", "true", "yes", "on"}
++        used_skills: list[str] = []
++
++        def _on_tool(tname: str, tinput: dict) -> None:
++            try:
++                if tname != "Skill":
++                    return
++                sk = ""
++                for k in ("command", "name", "skill", "skill_name", "skillName"):
++                    v = (tinput or {}).get(k)
++                    if isinstance(v, str) and v.strip():
++                        sk = v.strip()
++                        break
++                if not sk:
++                    for v in (tinput or {}).values():
++                        if isinstance(v, str) and v.strip():
++                            sk = v.strip().split()[0]
++                            break
++                sk = (sk or "skill").split("/")[-1].split(":")[-1]
++                if sk not in used_skills:
++                    used_skills.append(sk)
++                logger.info("[agent_sdk_bridge] skill invoked: %s (input_keys=%s)", sk, list((tinput or {}).keys()))
++            except Exception:
++                logger.debug("[agent_sdk_bridge] skill capture failed", exc_info=True)
++
 +        try:
-+            result = await bridge.run_turn(key, message, extra_system_append=extra_append)
++            result = await bridge.run_turn(
++                key, message, extra_system_append=extra_append, on_tool=_on_tool
++            )
 +        except Exception as e:
 +            logger.exception("agent_sdk_bridge turn failed (key=%s)", key)
 +            return {
@@ -87,8 +119,11 @@ index 4f3b123..cb0d4e9 100644
 +                "api_calls": 0,
 +                "completed": False,
 +            }
++        final_response = result.text or "(empty)"
++        if show_skills and used_skills:
++            final_response = f"{final_response}\n\n🧩 Скилы: " + ", ".join(used_skills)
 +        return {
-+            "final_response": result.text or "(empty)",
++            "final_response": final_response,
 +            "messages": [],
 +            "api_calls": result.num_turns or 1,
 +            "completed": not result.is_error,
@@ -97,7 +132,7 @@ index 4f3b123..cb0d4e9 100644
      async def _run_agent_inner(
          self,
          message: str,
-@@ -14451,6 +14539,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -14451,6 +14574,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                  event_message_id=event_message_id,
              )
  

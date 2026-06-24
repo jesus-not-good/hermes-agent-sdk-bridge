@@ -106,6 +106,7 @@ env -u ANTHROPIC_API_KEY \
 | `HERMES_SDK_WARM` | `1`/`true`/… | off | Hold a long-lived `ClaudeSDKClient` per chat (reuse the engine across turns). Cuts ~5–8s/turn (the spawn tax; ~14s with the full toolset). Off = cold `query()`+`resume` per turn. |
 | `HERMES_SDK_WARM_MAX` | int | `6` | Max concurrent live engine subprocesses (LRU-evicted) when warm. |
 | `HERMES_SDK_WARM_IDLE` | seconds | `900` | Reap a warm client idle longer than this. |
+| `HERMES_SDK_SHOW_SKILLS` | `1`/`0` | on | Append a line listing the skills the engine invoked this turn (`ToolUseBlock(name="Skill")`) to the reply. |
 
 The flag is **off by default**, so installing the add-on does not change stock behavior until
 you opt in.
