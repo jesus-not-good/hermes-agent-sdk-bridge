@@ -73,8 +73,9 @@ From your Hermes repo root (e.g. `~/.hermes/hermes-agent`):
 # 1. Install the Agent SDK into Hermes' venv (bundles its own Node engine)
 venv/bin/python -m pip install -U claude-agent-sdk
 
-# 2. Drop the add-on package into the repo root
+# 2. Drop the add-on package + the light command-gate module into the repo root
 cp -R /path/to/hermes-agent-sdk-bridge/agent_sdk_bridge ./agent_sdk_bridge
+cp /path/to/hermes-agent-sdk-bridge/hermes_sdk_gate.py ./hermes_sdk_gate.py
 
 # 3. Apply the gateway patch
 git apply /path/to/hermes-agent-sdk-bridge/patches/hermes-gateway-agent-sdk.patch
