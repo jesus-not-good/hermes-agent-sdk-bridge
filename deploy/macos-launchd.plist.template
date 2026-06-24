@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Always-on launchd service (macOS) for the Agent-SDK-backed Hermes gateway.
+
+  Replace the __PLACEHOLDERS__ with your absolute paths, then install:
+
+    cp macos-launchd.plist.template ~/Library/LaunchAgents/ai.hermes.sdktest.plist
+    # edit the copy: replace __PLACEHOLDERS__
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.sdktest.plist
+    launchctl print gui/$(id -u)/ai.hermes.sdktest | grep -i 'state ='
+
+  Redeploy after a code change:
+    launchctl kickstart -k gui/$(id -u)/ai.hermes.sdktest
+
+  Stop / remove:
+    launchctl bootout gui/$(id -u)/ai.hermes.sdktest
+
+  Notes:
+  - Do NOT set ANTHROPIC_API_KEY here — omitting it makes the engine use your
+    Claude Code subscription login (the whole point).
+  - The bot token + allowlist live in <HERMES_HOME>/.env, never in this plist.
+  - This is an always-on agent reachable via Telegram that can run tools after
+    /yolo. Keep the platform allowlist locked to your own user id.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.hermes.sdktest</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HERMES_REPO__/venv/bin/python</string>
+    <string>-m</string>
+    <string>hermes_cli.main</string>
+    <string>gateway</string>
+    <string>run</string>
+    <string>--force</string>
+    <string>--replace</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HERMES_HOME</key>
+    <string>__HERMES_HOME__</string>
+    <key>HERMES_USE_AGENT_SDK</key>
+    <string>1</string>
+    <key>HERMES_SDK_TOOLS</key>
+    <string>full</string>
+    <key>PYTHONPATH</key>
+    <string>__HERMES_REPO__</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>__HERMES_REPO__/venv/bin:__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>__HERMES_REPO__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>StandardOutPath</key>
+  <string>__HERMES_HOME__/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HERMES_HOME__/logs/launchd.err.log</string>
+</dict>
+</plist>

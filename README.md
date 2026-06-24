@@ -134,6 +134,24 @@ Work in progress: carrying Hermes' bundled skills into the SDK (`setting_sources
 wiring `/branch` to the bridge fork, and a warm-client latency optimization (the bridge spawns
 the engine per turn, ~7-8s base).
 
+## Always-on (macOS, launchd)
+
+To keep the bot running after you close the terminal and across reboots, install it as a
+launchd user agent. Template: `deploy/macos-launchd.plist.template` — replace the
+`__PLACEHOLDERS__`, copy to `~/Library/LaunchAgents/ai.hermes.sdktest.plist`, then:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.sdktest.plist
+launchctl print gui/$(id -u)/ai.hermes.sdktest | grep -i 'state ='   # -> running
+```
+
+- Redeploy after editing code: `launchctl kickstart -k gui/$(id -u)/ai.hermes.sdktest`
+- Stop / remove: `launchctl bootout gui/$(id -u)/ai.hermes.sdktest`
+
+The service deliberately omits `ANTHROPIC_API_KEY` so it uses your subscription login.
+It is an always-on agent that can run tools after `/yolo` — keep your platform allowlist
+locked to your own id, and treat it as you would any standing remote-shell exposure.
+
 ## Security
 
 - Never commit `.env` files or bot tokens. The platform token lives in your Hermes home
